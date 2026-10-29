@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""`vllm` entrypoint for the Nemotron-Transcribe image.
+
+The console runs `vllm serve <model> ... --host 0.0.0.0 --port <serving port>`
+and probes that port. This wrapper moves the engine to an internal port and
+puts the parakeet-compatible shim on the port the console asked for, so one
+container answers both the LLM API and parakeet's transcription API.
+"""
+
+import os
+import signal
+import subprocess
+import sys
+
+REAL_VLLM = "/opt/nemo/.venv/bin/vllm"
+SHIM = "/opt/shim/parakeet_shim.py"
+INTERNAL_PORT = 8000
+
+
+def main():
+    argv = sys.argv[1:]
+    public_port = int(os.environ.get("SHIM_PORT", "8080"))
+    forwarded, index = [], 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--port" and index + 1 < len(argv):
+            public_port = int(argv[index + 1])
+            forwarded += ["--port", str(INTERNAL_PORT)]
+            index += 2
+            continue
+        if token.startswith("--port="):
+            public_port = int(token.split("=", 1)[1])
+            forwarded.append("--port=%d" % INTERNAL_PORT)
+            index += 1
+            continue
+        forwarded.append(token)
+        index += 1
+
+    env = dict(
+        os.environ,
+        SHIM_UPSTREAM="http://127.0.0.1:%d" % INTERNAL_PORT,
+        SHIM_PORT=str(public_port),
+    )
+    shim = subprocess.Popen([sys.executable, SHIM], env=env)
+
+    def _stop(_signum, _frame):
+        shim.terminate()
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    sys.stderr.write(
+        "entrypoint: engine on %d, parakeet shim on %d\n" % (INTERNAL_PORT, public_port)
+    )
+    sys.stderr.flush()
+    os.execv(REAL_VLLM, [REAL_VLLM] + forwarded)
+
+
+if __name__ == "__main__":
+    main()
