@@ -4,6 +4,7 @@
   "name": "parakeet-primeline-v3",
   "runtime": "vllm",
   "model": "nemotron-3.5-transcribe-30b-a4b-nvfp4",
+  "weights_from_s3": true,
   "weights_staging": true,
   "weights_staging_mib": 40960,
   "image": "ghcr.io/flozi00/nemotron-transcribe-server:main",

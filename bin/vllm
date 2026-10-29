@@ -12,14 +12,18 @@ import signal
 import subprocess
 import sys
 
-REAL_VLLM = "/opt/nemo/.venv/bin/vllm"
+REAL_VLLM = os.environ.get("REAL_VLLM", "/opt/nemo/.venv/bin/vllm")
 SHIM = "/opt/shim/parakeet_shim.py"
-INTERNAL_PORT = 8000
+# The console runs `vllm serve ... --port 8000` and probes 8000, so the shim
+# takes the public port and the engine moves aside. It must NOT be 8000: the
+# console's serving port IS 8000, and two listeners on one port means the
+# engine dies with EADDRINUSE after the shim has already bound it.
+INTERNAL_PORT = 18000
 
 
 def main():
     argv = sys.argv[1:]
-    public_port = int(os.environ.get("SHIM_PORT", "8080"))
+    public_port = int(os.environ.get("SHIM_PORT", "8000"))
     forwarded, index = [], 0
     while index < len(argv):
         token = argv[index]
@@ -35,6 +39,15 @@ def main():
             continue
         forwarded.append(token)
         index += 1
+
+    if public_port == INTERNAL_PORT:
+        # Only reachable if the console is ever pointed at the internal port;
+        # fail loud rather than start two listeners on one socket.
+        sys.stderr.write(
+            "entrypoint: refusing to run — the serving port %d is the engine's "
+            "internal port; set a different --port\n" % public_port
+        )
+        return 2
 
     env = dict(
         os.environ,
@@ -56,4 +69,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
