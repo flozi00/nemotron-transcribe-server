@@ -187,7 +187,11 @@ def transcribe(fields, files):
 
     audio_url = "data:%s;base64,%s" % (_mime_for(filename), base64.b64encode(payload).decode())
     body = {
-        "model": _first(fields, "model") or MODEL,
+        # Always the served name, never the client's. Parakeet's server serves
+        # exactly one model and ignores the field, so a client that still sends
+        # an old alias (or none) must keep working; forwarding it verbatim would
+        # make vLLM answer 404 "model not found".
+        "model": MODEL,
         "messages": [{
             "role": "user",
             "content": [

@@ -162,6 +162,16 @@ def main():
         if not any(part.get("type") == "audio_url" for part in content):
             failures.append("audio_url part missing from the chat request")
 
+        # A client that still sends an old alias (or none at all) must keep
+        # working: parakeet serves one model and ignores the field, so the shim
+        # always sends the served name upstream.
+        post({"model": "parakeet", "response_format": "json"}, audio)
+        if CAPTURED.get("model") != "primeline/parakeet-primeline":
+            failures.append("stale model alias was forwarded: %r" % CAPTURED.get("model"))
+        post({"response_format": "json"}, audio)
+        if CAPTURED.get("model") != "primeline/parakeet-primeline":
+            failures.append("missing model field was not defaulted: %r" % CAPTURED.get("model"))
+
         diarized = post({"response_format": "diarized_json"}, audio)
         if set(diarized) != {"task", "duration", "text", "segments"}:
             failures.append("diarized keys wrong: %r" % sorted(diarized))
