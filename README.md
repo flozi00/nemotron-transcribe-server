@@ -71,10 +71,14 @@ docker run --gpus all -p 8080:8080 \
 ```
 
 `--port` is the *public* port: the wrapper starts the shim there and runs the
-engine on 8000.
+engine on **18000**. The two must never coincide — the console runs
+`vllm serve … --port 8000` and probes 8000, so an internal port of 8000 meant
+the shim bound the socket first and the engine died with `EADDRINUSE`. The
+wrapper refuses outright if the public port is ever 18000.
 
 ## Test
 
 ```bash
-python3 test_shim.py     # real shim process against a fake vLLM upstream
+python3 test_shim.py        # real shim process against a fake vLLM upstream
+python3 -m unittest test_entrypoint   # port rewriting + the collision refusal
 ```
