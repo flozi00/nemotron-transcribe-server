@@ -37,7 +37,20 @@ with the audio inline. `shim/parakeet_shim.py` therefore:
   through, and answers `/health` and `/ready` in parakeet's shape.
 
 Diarization comes from the checkpoint's own speaker encoder: the transcript
-carries `<spk:N>` tags, and the CTC alignment times each speaker run.
+carries `<spk:N>` tags, and the CTC alignment times each speaker run. Speaker
+labels are single letters in order of first appearance (`A`, `B`, …), which is
+what parakeet-server's own diarization emits.
+
+Two fields are deliberately not what parakeet does:
+
+- `language` is the client's own `language` field when it sends one, otherwise
+  `SHIM_LANGUAGE` (default `de`). Parakeet detects it; this model can identify
+  a language only as its own task, and a prompt that asks for the code inline
+  is ignored (measured), so detection would cost a second call for a field no
+  client here branches on.
+- `segments` are split at sentence-ending punctuation from the CTC word
+  timings, which reproduces parakeet's shape. If the alignment is missing the
+  shim degrades to one whole-file segment rather than inventing timings.
 
 ## Build
 

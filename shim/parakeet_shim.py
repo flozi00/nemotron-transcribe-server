@@ -29,6 +29,13 @@ PORT = int(os.environ.get("SHIM_PORT", "8080"))
 MODEL = os.environ.get("SHIM_MODEL", "primeline/parakeet-primeline")
 # A dense one-hour conversation needs about 20k output tokens (model card).
 MAX_TOKENS = int(os.environ.get("SHIM_MAX_TOKENS", "32768"))
+# The `language` field parakeet reports. Parakeet detects it; this model can
+# identify a language but only when asked as its own task, and a prompt that
+# asks for the code inline is ignored (measured), so a second call would be
+# needed for a field no client in this deployment branches on. The client's
+# own `language` wins when it sends one; otherwise this is the deployment's
+# language, which is what the pool is for.
+LANGUAGE = os.environ.get("SHIM_LANGUAGE", "de")
 
 TRANSCRIBE_PROMPT = (
     "Audio transcription. Language: as spoken. Wording: verbatim, including "
@@ -130,25 +137,45 @@ def _speaker_runs(text):
     return runs
 
 
+def _speaker_key(value):
+    """`<spk:0>`, `0` and `"0"` are the same speaker.
+
+    The transcript carries `<spk:N>` tags while the CTC alignment reports the
+    bare index (`"speaker": "0"`), and the tag→diarization map is keyed by the
+    bare index too. Comparing the raw values matches nothing on live output,
+    which silently degrades every diarized segment to the whole file.
+    """
+    text = str(value if value is not None else "")
+    match = re.fullmatch(r"<spk:(\d+)>", text)
+    return match.group(1) if match else text
+
+
 def _segments_from_alignment(alignment, raw_text, duration):
-    """parakeet's diarized segments: transcript text per speaker, timed by the CTC alignment."""
+    """parakeet's diarized segments: transcript text per speaker, timed by the CTC alignment.
+
+    Speaker labels are single letters in order of first appearance (`A`, `B`,
+    …), which is exactly what parakeet-server's own diarization emits — a
+    client that groups by `speaker` must not see a different vocabulary.
+    """
     runs = _speaker_runs(raw_text)
     if not runs:
         return None
     words = (alignment or {}).get("words") or []
-    mapping = (alignment or {}).get("speaker_tag_to_diarization_speaker") or {}
+    labels = {}
     segments = []
     for tag, spoken in runs:
-        timed = [word for word in words if str(word.get("speaker") or "") == tag]
+        key = _speaker_key(tag)
+        timed = [word for word in words if _speaker_key(word.get("speaker")) == key]
         if timed:
             start = min(float(word.get("start") or 0.0) for word in timed)
             end = max(float(word.get("end") or 0.0) for word in timed)
         else:
             start, end = 0.0, duration
+        label = labels.setdefault(key, chr(ord("A") + len(labels)))
         segments.append({
             "id": str(len(segments)),
             "type": "transcript.text.segment",
-            "speaker": str(mapping.get(tag) or "SPEAKER_%02d" % len(segments)),
+            "speaker": label,
             "start": round(start, 3),
             "end": round(end, 3),
             "text": spoken,
@@ -156,8 +183,48 @@ def _segments_from_alignment(alignment, raw_text, duration):
     return segments or None
 
 
-def _plain_segments(text, duration):
-    """parakeet's non-diarized segment shape (its own single-segment fallback)."""
+def _plain_segments(text, duration, alignment=None):
+    """parakeet's non-diarized segments: one per sentence, timed by the CTC alignment.
+
+    Prod parakeet splits a transcript at sentence boundaries and gives each
+    segment its own start/end, so a client that renders subtitles or seeks by
+    segment keeps working. The CTC head gives word-level timings; grouping
+    them at sentence-ending punctuation reproduces that shape. Without an
+    alignment (or when it does not cover the text) this degrades to the single
+    whole-file segment it used to return.
+    """
+    words = (alignment or {}).get("words") or []
+    grouped, current = [], []
+    for word in words:
+        piece = str(word.get("word") or "").strip()
+        if not piece:
+            continue
+        current.append(word)
+        if piece[-1] in ".!?":
+            grouped.append(current)
+            current = []
+    if current:
+        grouped.append(current)
+
+    segments = []
+    for group in grouped:
+        spoken = " ".join(str(word.get("word") or "").strip() for word in group).strip()
+        if not spoken:
+            continue
+        segments.append({
+            "id": len(segments),
+            "seek": 0,
+            "start": round(float(group[0].get("start") or 0.0), 3),
+            "end": round(float(group[-1].get("end") or 0.0), 3),
+            "text": spoken,
+            "tokens": [],
+            "temperature": 0.0,
+            "avg_logprob": None,
+            "compression_ratio": None,
+            "no_speech_prob": None,
+        })
+    if segments:
+        return segments
     return [{
         "id": 0,
         "seek": 0,
@@ -183,7 +250,7 @@ def transcribe(fields, files):
 
     response_format = _first(fields, "response_format") or "json"
     diarize = response_format == "diarized_json"
-    language = _first(fields, "language") or "de"
+    language = _first(fields, "language") or LANGUAGE
 
     audio_url = "data:%s;base64,%s" % (_mime_for(filename), base64.b64encode(payload).decode())
     body = {
@@ -242,7 +309,7 @@ def transcribe(fields, files):
 
     return {
         "text": text,
-        "segments": _plain_segments(text, duration),
+        "segments": _plain_segments(text, duration, alignment),
         "language": language,
         "duration": duration,
         "transcription_time": elapsed,

@@ -67,20 +67,20 @@ class FakeVLLM(BaseHTTPRequestHandler):
                                      "content": "<spk:0> Guten Tag. <spk:1> Hallo zusammen."}}],
             "ctc_timestamps": {
                 "error": None,
+                # The live alignment reports the bare speaker index, not the
+                # `<spk:N>` tag the transcript carries — the fixture must too,
+                # or the tag-matching bug it guards against stays invisible.
                 "words": [
-                    {"word": "Guten", "start": 0.1, "end": 0.4, "speaker": "<spk:0>"},
-                    {"word": "Tag", "start": 0.4, "end": 0.7, "speaker": "<spk:0>"},
-                    {"word": "Hallo", "start": 1.1, "end": 1.4, "speaker": "<spk:1>"},
-                    {"word": "zusammen", "start": 1.4, "end": 1.9, "speaker": "<spk:1>"},
+                    {"word": "Guten", "start": 0.1, "end": 0.4, "speaker": "0"},
+                    {"word": "Tag.", "start": 0.4, "end": 0.7, "speaker": "0"},
+                    {"word": "Hallo", "start": 1.1, "end": 1.4, "speaker": "1"},
+                    {"word": "zusammen.", "start": 1.4, "end": 1.9, "speaker": "1"},
                 ],
                 "diarization": [
-                    {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0},
-                    {"speaker": "SPEAKER_01", "start": 1.0, "end": 2.0},
+                    {"speaker": 0, "start": 0.1, "end": 0.7},
+                    {"speaker": 1, "start": 1.1, "end": 1.9},
                 ],
-                "speaker_tag_to_diarization_speaker": {
-                    "<spk:0>": "SPEAKER_00",
-                    "<spk:1>": "SPEAKER_01",
-                },
+                "speaker_tag_to_diarization_speaker": {"0": 0, "1": 1},
             },
         })
 
@@ -156,6 +156,20 @@ def main():
                 failures.append("plain segment missing %r" % key)
         if CAPTURED.get("mm_processor_kwargs") != {"capture_ctc_timestamps": True}:
             failures.append("timestamps were not requested")
+        # Prod parakeet splits a transcript at sentence boundaries and times
+        # each segment; a client that renders subtitles depends on it.
+        plain_segments = plain.get("segments") or []
+        if [s.get("text") for s in plain_segments] != ["Guten Tag.", "Hallo zusammen."]:
+            failures.append("plain segments are not sentence-split: %r"
+                            % [s.get("text") for s in plain_segments])
+        if [(s.get("start"), s.get("end")) for s in plain_segments] != [(0.1, 0.7), (1.1, 1.9)]:
+            failures.append("plain segment timings wrong: %r"
+                            % [(s.get("start"), s.get("end")) for s in plain_segments])
+        if plain.get("language") != "de":
+            failures.append("language default wrong: %r" % plain.get("language"))
+        echoed = post({"response_format": "json", "language": "en"}, audio)
+        if echoed.get("language") != "en":
+            failures.append("client language not echoed: %r" % echoed.get("language"))
         if CAPTURED.get("skip_special_tokens") is not False:
             failures.append("skip_special_tokens must stay false")
         content = (CAPTURED.get("messages") or [{}])[0].get("content") or []
@@ -176,8 +190,11 @@ def main():
         if set(diarized) != {"task", "duration", "text", "segments"}:
             failures.append("diarized keys wrong: %r" % sorted(diarized))
         speakers = [segment.get("speaker") for segment in diarized.get("segments") or []]
-        if speakers != ["SPEAKER_00", "SPEAKER_01"]:
+        if speakers != ["A", "B"]:
             failures.append("diarized speakers wrong: %r" % speakers)
+        starts = [segment.get("start") for segment in diarized.get("segments") or []]
+        if starts != [0.1, 1.1]:
+            failures.append("diarized segment timings wrong: %r" % starts)
         texts = [segment.get("text") for segment in diarized.get("segments") or []]
         if texts != ["Guten Tag.", "Hallo zusammen."]:
             failures.append("diarized segment text wrong: %r" % texts)
